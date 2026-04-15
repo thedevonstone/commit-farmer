@@ -1,0 +1,19 @@
+{
+  "name": "commit-farmer",
+  "version": "0.1.0",
+  "description": "A transparent GitHub contribution graph gardener",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "farm": "node src/index.js --mode=farm",
+    "dry-run": "node src/index.js --dry-run",
+    "force": "node src/index.js --force"
+  },
+  "keywords": ["github", "automation", "contributions", "transparent"],
+  "author": "Devon Stone",
+  "license": "MIT",
+  "dependencies": {
+    "@octokit/rest": "^20.0.0",
+    "dotenv": "^16.0.0"
+  }
+}

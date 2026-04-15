@@ -1,0 +1,81 @@
+{
+  "intensity": "medium",
+
+  "profiles": {
+    "light": {
+      "description": "Casual contributor — a few times a week, small sessions",
+      "commitDaysPerWeek": 2,
+      "sessionSizeMin": 1,
+      "sessionSizeMax": 3,
+      "drySpellDaysMin": 2,
+      "drySpellDaysMax": 7
+    },
+    "medium": {
+      "description": "Active contributor — most weekdays, moderate sessions",
+      "commitDaysPerWeek": 4,
+      "sessionSizeMin": 1,
+      "sessionSizeMax": 6,
+      "drySpellDaysMin": 1,
+      "drySpellDaysMax": 3
+    },
+    "heavy": {
+      "description": "Very active — nearly every day, larger sessions",
+      "commitDaysPerWeek": 6,
+      "sessionSizeMin": 2,
+      "sessionSizeMax": 10,
+      "drySpellDaysMin": 0,
+      "drySpellDaysMax": 2
+    }
+  },
+
+  "schedule": {
+    "dayWeights": {
+      "sunday":    0.15,
+      "monday":    0.75,
+      "tuesday":   1.00,
+      "wednesday": 1.00,
+      "thursday":  0.90,
+      "friday":    0.60,
+      "saturday":  0.20
+    },
+    "hourWindows": [
+      { "label": "early morning", "start": 7,  "end": 9,  "weight": 0.4 },
+      { "label": "morning",       "start": 9,  "end": 12, "weight": 0.7 },
+      { "label": "midday",        "start": 12, "end": 14, "weight": 0.4 },
+      { "label": "afternoon",     "start": 14, "end": 17, "weight": 1.0 },
+      { "label": "evening",       "start": 17, "end": 20, "weight": 0.7 },
+      { "label": "night",         "start": 20, "end": 23, "weight": 0.25 },
+      { "label": "late night",    "start": 23, "end": 7,  "weight": 0.05 }
+    ]
+  },
+
+  "sessions": {
+    "minGapMinutes": 6,
+    "maxGapMinutes": 52,
+    "gapJitterMinutes": 8
+  },
+
+  "drySpellOverride": {
+    "enabled": true,
+    "triggerAfterDays": 6,
+    "description": "Force a commit if no activity for this many days — avoids suspicious long gaps"
+  },
+
+  "streakBreaker": {
+    "enabled": true,
+    "triggerAfterDays": 8,
+    "description": "Force a day off after this many consecutive days — avoids suspicious perfect streaks"
+  },
+
+  "githubApi": {
+    "issueSimulation": {
+      "enabled": true,
+      "openFrequencyDays": 5,
+      "closeAfterCommits": 8
+    },
+    "prSimulation": {
+      "enabled": false,
+      "description": "PR simulation — enable once core commit flow is stable"
+    }
+  }
+}
