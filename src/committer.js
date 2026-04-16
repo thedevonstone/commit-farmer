@@ -110,22 +110,7 @@ function getTargetFile(changeType) {
 // Content generation
 // ---------------------------------------------------------------------------
 
-// Short filler entries used for add/update/fix commits.
-// Kept generic so they don't need to be topic-aware.
-const addSnippets = [
-  '\n---\n\n## Note\n\nAdded a short note here for reference. Worth expanding later.\n',
-  '\n---\n\n## Quick reference\n\nA pattern worth keeping handy. Details TBD.\n',
-  '\n---\n\n## Reminder\n\nSomething to come back to. Added placeholder for now.\n',
-  '\n---\n\n## Draft\n\nRough notes. Will clean up when I have more context.\n',
-  '\n---\n\n## Entry\n\nShort observation from today. Needs more examples.\n',
-];
-
-const updateSnippets = [
-  '\n\n<!-- updated: added context -->\n',
-  '\n\n<!-- revised wording for clarity -->\n',
-  '\n\n<!-- expanded with additional example -->\n',
-  '\n\n<!-- minor corrections applied -->\n',
-];
+const { getEntry, formatEntry } = require('./content');
 
 const fixSnippets = [
   '\n\n<!-- fixed: typo in previous entry -->\n',
@@ -141,10 +126,23 @@ const indexUpdateSnippets = [
 ];
 
 /**
+ * Extracts the topic name from a file path.
+ * 'javascript/2026-04.md' → 'javascript'
+ * 'index.md' → null
+ */
+function topicFromPath(filePath) {
+  const parts = filePath.split('/');
+  return parts.length > 1 ? parts[0] : null;
+}
+
+/**
  * Returns the new full file content after applying the change.
  * existingContent: the current file content as a string.
  * changeType: 'add' | 'update' | 'fix' | 'chore'
- * filePath: used to pick index-appropriate snippets
+ * filePath: used to derive topic and detect index.md
+ *
+ * add + update → append a real TIL entry from the content bank
+ * fix + chore  → append a lightweight comment (minor edit simulation)
  */
 function generateContent(existingContent, changeType, filePath) {
   const isIndex = filePath === 'index.md';
@@ -155,13 +153,11 @@ function generateContent(existingContent, changeType, filePath) {
   }
 
   switch (changeType) {
-    case 'add': {
-      const snippet = addSnippets[Math.floor(Math.random() * addSnippets.length)];
-      return existingContent + snippet;
-    }
+    case 'add':
     case 'update': {
-      const snippet = updateSnippets[Math.floor(Math.random() * updateSnippets.length)];
-      return existingContent + snippet;
+      const topic = topicFromPath(filePath);
+      const entry = getEntry(topic);
+      return existingContent + formatEntry(entry);
     }
     case 'fix': {
       const snippet = fixSnippets[Math.floor(Math.random() * fixSnippets.length)];
