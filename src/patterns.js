@@ -46,8 +46,80 @@
  *   - A perfect 365-day streak is a red flag
  *   - Real devs take weekends off at least occasionally
  *   - Forced day-off logic prevents suspicious perfection
- *
- * TODO: implement loadProfile(name)
- * TODO: implement applyDrySpellLogic(profile, state)
- * TODO: implement applyStreakBreakerLogic(profile, state)
  */
+
+const config = require('../config/default.json');
+
+/**
+ * Weighted random index selection.
+ * weights: array of non-negative numbers.
+ * Returns the index of the selected item.
+ */
+function weightedRandom(weights) {
+  const total = weights.reduce((sum, w) => sum + w, 0);
+  let roll = Math.random() * total;
+  for (let i = 0; i < weights.length; i++) {
+    roll -= weights[i];
+    if (roll <= 0) return i;
+  }
+  return weights.length - 1; // float rounding fallback
+}
+
+/**
+ * Loads a named profile from config.
+ * Falls back to config.intensity if name is not provided.
+ * Falls back to 'medium' if neither is set.
+ * Throws if the profile name is not found in config.
+ */
+function loadProfile(name) {
+  const profileName = name || process.env.INTENSITY || config.intensity || 'medium';
+  const profile = config.profiles[profileName];
+  if (!profile) {
+    throw new Error(`[patterns] unknown profile: "${profileName}". Valid options: ${Object.keys(config.profiles).join(', ')}`);
+  }
+  return { name: profileName, ...profile };
+}
+
+/**
+ * Checks whether the current dry spell should force a commit today.
+ * Returns { forceCommit: bool, reason?: string }
+ *
+ * The dry spell is the number of consecutive days without a commit.
+ * state.currentDrySpellDays is recomputed dynamically in readState()
+ * from lastCommitDate so it stays accurate even if runs are missed.
+ */
+function applyDrySpellLogic(profile, state) {
+  const cfg = config.drySpellOverride;
+  if (!cfg.enabled) return { forceCommit: false };
+
+  if (state.currentDrySpellDays >= cfg.triggerAfterDays) {
+    return {
+      forceCommit: true,
+      reason: `dry spell override — ${state.currentDrySpellDays} days without a commit (threshold: ${cfg.triggerAfterDays})`,
+    };
+  }
+
+  return { forceCommit: false };
+}
+
+/**
+ * Checks whether the current streak should force a skip today.
+ * Returns { forceSkip: bool, reason?: string }
+ *
+ * Prevents suspiciously long unbroken streaks.
+ */
+function applyStreakBreakerLogic(profile, state) {
+  const cfg = config.streakBreaker;
+  if (!cfg.enabled) return { forceSkip: false };
+
+  if (state.currentStreakDays >= cfg.triggerAfterDays) {
+    return {
+      forceSkip: true,
+      reason: `streak breaker — ${state.currentStreakDays} consecutive days (threshold: ${cfg.triggerAfterDays})`,
+    };
+  }
+
+  return { forceSkip: false };
+}
+
+module.exports = { weightedRandom, loadProfile, applyDrySpellLogic, applyStreakBreakerLogic };

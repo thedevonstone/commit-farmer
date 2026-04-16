@@ -2,30 +2,173 @@
  * commit-farmer — entry point
  *
  * Orchestrates a farming session. On each run:
- *   1. Load config and environment
- *   2. Check if today is a commit day (scheduler)
- *   3. If yes, determine session size
- *   4. Execute commits with realistic timing gaps
- *   5. Optionally fire GitHub API actions (issues, PRs)
- *   6. Write state for next run
+ *   1. Load config, env, and flags
+ *   2. Read state
+ *   3. Decide whether to commit today (scheduler)
+ *   4. If yes, determine session size and timestamps
+ *   5. Execute commits with backdated timestamps
+ *   6. Handle issue simulation (open/close)
+ *   7. Write updated state
+ *   8. Log run summary
  *
  * Run modes:
  *   node src/index.js             normal farm run
  *   node src/index.js --dry-run   log what would happen, no real commits
  *   node src/index.js --force     skip probability check, always commit
- *
- * TODO: implement orchestration logic
- * TODO: wire up scheduler, committer, and github-api modules
- * TODO: handle --dry-run and --force flags from process.argv
- * TODO: write run summary to console for GitHub Actions log visibility
  */
 
 require('dotenv').config();
-const config = require('../config/default.json');
 
-async function main() {
-  console.log('[commit-farmer] starting run...');
-  // TODO: implement
+const {
+  readState,
+  writeState,
+  computeNextState,
+  shouldCommitToday,
+  getSessionSize,
+  getSessionTimestamps,
+} = require('./scheduler');
+
+const { loadProfile } = require('./patterns');
+const { getWeightedMessage, getMessage } = require('./messages');
+const { makeCommit, getOctokit, getTarget } = require('./committer');
+const {
+  getOpenIssues,
+  openIssue,
+  closeIssue,
+  shouldOpenIssue,
+  shouldCloseIssue,
+} = require('./github-api');
+
+// ---------------------------------------------------------------------------
+// Parse CLI flags once at startup
+// ---------------------------------------------------------------------------
+
+const flags = {
+  dryRun: process.argv.includes('--dry-run') || process.env.DRY_RUN === 'true',
+  force:  process.argv.includes('--force')   || process.env.FORCE   === 'true',
+};
+
+// ---------------------------------------------------------------------------
+// Derive change type from message (maps message prefix to change type)
+// ---------------------------------------------------------------------------
+
+function changeTypeFromMessage(message) {
+  if (message.startsWith('fix') || message.startsWith('correct')) return 'fix';
+  if (message.startsWith('add'))                                    return 'add';
+  if (message.startsWith('tidy') ||
+      message.startsWith('reorganize') ||
+      message.startsWith('normalize') ||
+      message.startsWith('remove') ||
+      message.startsWith('sort') ||
+      message.startsWith('consolidate'))                            return 'chore';
+  return 'update';
 }
 
-main().catch(console.error);
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+
+async function main() {
+  console.log(`[commit-farmer] starting run — dry-run: ${flags.dryRun}, force: ${flags.force}`);
+
+  const profile = loadProfile();
+  const state   = readState();
+
+  console.log(`[commit-farmer] profile: ${profile.name} | streak: ${state.currentStreakDays} days | dry spell: ${state.currentDrySpellDays} days | total commits: ${state.totalCommits}`);
+
+  // --- Commit decision ---------------------------------------------------
+
+  let decision;
+  if (flags.force) {
+    decision = { commit: true, forced: true, reason: '--force flag set' };
+  } else {
+    decision = shouldCommitToday(profile, state);
+  }
+
+  console.log(`[scheduler] ${decision.commit ? 'committing' : 'skipping'} — ${decision.reason}`);
+
+  if (!decision.commit) {
+    const nextState = computeNextState(state, false, 0);
+    writeState(nextState);
+    console.log('[commit-farmer] run complete — no commits today');
+    return;
+  }
+
+  // --- Session planning --------------------------------------------------
+
+  const sessionSize = getSessionSize(profile);
+  const timestamps  = getSessionTimestamps(sessionSize);
+
+  console.log(`[scheduler] session: ${sessionSize} commit${sessionSize > 1 ? 's' : ''}`);
+  timestamps.forEach((ts, i) => {
+    console.log(`[scheduler]   commit ${i + 1}: ${ts.toISOString()}`);
+  });
+
+  if (flags.dryRun) {
+    console.log('[dry-run] would make the above commits — exiting without pushing');
+    return;
+  }
+
+  // --- Execute commits ---------------------------------------------------
+
+  const octokit       = getOctokit();
+  const { owner, repo } = getTarget();
+  let committedCount  = 0;
+
+  for (let i = 0; i < sessionSize; i++) {
+    const message    = getWeightedMessage();
+    const changeType = changeTypeFromMessage(message);
+    const timestamp  = timestamps[i];
+
+    console.log(`[committer] commit ${i + 1}/${sessionSize} — "${message}"`);
+
+    try {
+      await makeCommit(changeType, message, timestamp);
+      committedCount++;
+    } catch (err) {
+      console.error(`[committer] commit ${i + 1} failed: ${err.message}`);
+      // Continue with remaining commits — partial session is still valid
+    }
+  }
+
+  // --- Issue simulation --------------------------------------------------
+
+  const openIssueNumbers = await getOpenIssues(octokit, owner, repo).catch(() => []);
+  state.openIssues = openIssueNumbers;
+
+  if (shouldCloseIssue(openIssueNumbers.length, state.totalCommits)) {
+    const toClose = openIssueNumbers[0];
+    await closeIssue(octokit, owner, repo, toClose).catch(err => {
+      console.error(`[github-api] failed to close issue #${toClose}: ${err.message}`);
+    });
+    state.openIssues = openIssueNumbers.filter(n => n !== toClose);
+  }
+
+  if (shouldOpenIssue(state.openIssues.length)) {
+    const newIssue = await openIssue(octokit, owner, repo).catch(err => {
+      console.error(`[github-api] failed to open issue: ${err.message}`);
+      return null;
+    });
+    if (newIssue) state.openIssues.push(newIssue);
+  }
+
+  // --- Write state -------------------------------------------------------
+
+  const nextState = computeNextState(
+    { ...state },
+    committedCount > 0,
+    committedCount,
+  );
+  nextState.openIssues = state.openIssues;
+  writeState(nextState);
+
+  // --- Summary -----------------------------------------------------------
+
+  console.log(`[commit-farmer] run complete — ${committedCount}/${sessionSize} commits pushed`);
+  console.log(`[state] streak: ${nextState.currentStreakDays} days | total: ${nextState.totalCommits} commits`);
+}
+
+main().catch(err => {
+  console.error('[commit-farmer] fatal:', err.message);
+  process.exit(1);
+});

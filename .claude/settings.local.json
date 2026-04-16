@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:api.github.com)",
+      "Bash(curl *)",
+      "Bash(gh api *)",
+      "Bash(mkdir -p I:/commit-farmer/.claude/skills/full-output-enforcement)",
+      "Bash(mkdir -p I:/commit-farmer/.claude/skills/nodejs-backend-standards)",
+      "Bash(cat I:/commit-farmer/.github/workflows/*.yml)",
+      "Bash(npm install *)",
+      "Bash(node -e ' *)",
+      "Bash(gh auth *)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(gh repo *)",
+      "Bash(node src/index.js --dry-run)",
+      "Bash(node src/index.js --force)"
+    ]
+  }
+}

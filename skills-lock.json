@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "skills": {
+    "full-output-enforcement": {
+      "source": "Leonxlnx/taste-skill",
+      "sourceType": "github",
+      "computedHash": "26bd29ce4c5e02c7666b2d503609bf466bd32290822e91f0e984147048dbb924"
+    },
+    "nodejs-backend-standards": {
+      "source": "local",
+      "sourceType": "local"
+    }
+  }
+}

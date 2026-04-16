@@ -13,6 +13,8 @@
  *   docs    5%
  */
 
+const { weightedRandom } = require('./patterns');
+
 const messages = {
   add: [
     'add note on async patterns',
@@ -76,8 +78,35 @@ const messages = {
   ],
 };
 
-// TODO: implement getMessage(category)
-// TODO: implement getWeightedMessage()
-// TODO: export both functions
+const categoryWeights = {
+  fix:    30,
+  update: 25,
+  add:    25,
+  chore:  15,
+  docs:    5,
+};
 
-module.exports = { messages };
+/**
+ * Returns a random message from the given category.
+ * Throws if the category does not exist.
+ */
+function getMessage(category) {
+  const pool = messages[category];
+  if (!pool || pool.length === 0) {
+    throw new Error(`[messages] unknown category: ${category}`);
+  }
+  return pool[Math.floor(Math.random() * pool.length)];
+}
+
+/**
+ * Picks a category by weight, then returns a random message from it.
+ * fix 30% / update 25% / add 25% / chore 15% / docs 5%
+ */
+function getWeightedMessage() {
+  const categories = Object.keys(categoryWeights);
+  const weights = categories.map(c => categoryWeights[c]);
+  const idx = weightedRandom(weights);
+  return getMessage(categories[idx]);
+}
+
+module.exports = { messages, getMessage, getWeightedMessage };
