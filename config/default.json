@@ -74,8 +74,9 @@
       "closeAfterCommits": 8
     },
     "prSimulation": {
-      "enabled": false,
-      "description": "PR simulation — enable once core commit flow is stable"
+      "enabled": true,
+      "openFrequencyDays": 10,
+      "mergeAfterDays": 4
     }
   }
 }

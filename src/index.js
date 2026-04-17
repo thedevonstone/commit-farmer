@@ -37,6 +37,11 @@ const {
   closeIssue,
   shouldOpenIssue,
   shouldCloseIssue,
+  getOpenPRs,
+  openPRWorkflow,
+  mergePR,
+  shouldOpenPR,
+  shouldMergePR,
 } = require('./github-api');
 
 // ---------------------------------------------------------------------------
@@ -152,6 +157,30 @@ async function main() {
     if (newIssue) state.openIssues.push(newIssue);
   }
 
+  // --- PR simulation -----------------------------------------------------
+
+  const authorName  = process.env.GIT_AUTHOR_NAME  || 'Devon Stone';
+  const authorEmail = process.env.GIT_AUTHOR_EMAIL || 'thedevonstone@gmail.com';
+
+  const openPRs = await getOpenPRs(octokit, owner, repo).catch(() => []);
+  state.openPRs = openPRs;
+
+  if (shouldMergePR(openPRs.length)) {
+    const toMerge = openPRs[0];
+    await mergePR(octokit, owner, repo, toMerge.number, toMerge.branch).catch(err => {
+      console.error(`[github-api] failed to merge PR #${toMerge.number}: ${err.message}`);
+    });
+    state.openPRs = openPRs.filter(p => p.number !== toMerge.number);
+  }
+
+  if (shouldOpenPR(state.openPRs.length)) {
+    const newPR = await openPRWorkflow(octokit, owner, repo, authorName, authorEmail).catch(err => {
+      console.error(`[github-api] failed to open PR: ${err.message}`);
+      return null;
+    });
+    if (newPR) state.openPRs.push(newPR);
+  }
+
   // --- Write state -------------------------------------------------------
 
   const nextState = computeNextState(
@@ -160,6 +189,7 @@ async function main() {
     committedCount,
   );
   nextState.openIssues = state.openIssues;
+  nextState.openPRs    = state.openPRs;
   writeState(nextState);
 
   // --- Summary -----------------------------------------------------------
