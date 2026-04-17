@@ -16,7 +16,10 @@
       "Bash(git commit *)",
       "Bash(gh repo *)",
       "Bash(node src/index.js --dry-run)",
-      "Bash(node src/index.js --force)"
+      "Bash(node src/index.js --force)",
+      "Bash(gh workflow *)",
+      "Bash(gh run *)",
+      "Bash(node src/index.js --dry-run --force)"
     ]
   }
 }
