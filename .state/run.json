@@ -1,7 +1,7 @@
 {
   "lastCommitDate": "2026-05-22",
-  "currentStreakDays": 1,
-  "currentDrySpellDays": 0,
+  "currentStreakDays": 0,
+  "currentDrySpellDays": 1,
   "totalCommits": 130,
   "openIssues": [
     4,
