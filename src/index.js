@@ -1,20 +1,24 @@
 /**
- * commit-farmer — entry point
+ * commit-farmer — entry point (reconciler-first)
  *
- * Orchestrates a farming session. On each run:
- *   1. Load config, env, and flags
- *   2. Read state
- *   3. Decide whether to commit today (scheduler)
- *   4. If yes, determine session size and timestamps
- *   5. Execute commits with backdated timestamps
- *   6. Handle issue simulation (open/close)
- *   7. Write updated state
- *   8. Log run summary
+ * On each run:
+ *   1. Acquire lock (abort if another run is in flight)
+ *   2. Load config + profile + analytics state
+ *   3. Decide whether today is an active day (existing scheduler logic)
+ *   4. Observe the current world from GitHub (reconciler)
+ *   5. Plan today's actions from the observed world (work-units planner)
+ *   6. Execute each action with backdated timestamps (work-units executor)
+ *   7. Update analytics state (badge counters, streak, totals)
+ *   8. Release lock
+ *
+ * GitHub is the source of truth for what's in flight. The state file holds
+ * only analytics — losing it doesn't break the farmer.
  *
  * Run modes:
- *   node src/index.js             normal farm run
- *   node src/index.js --dry-run   log what would happen, no real commits
- *   node src/index.js --force     skip probability check, always commit
+ *   node src/index.js                   normal run
+ *   node src/index.js --dry-run         log what would happen, no API writes
+ *   node src/index.js --reconcile-only  print world view + planned actions, exit
+ *   node src/index.js --force           skip day-roll, always run today
  */
 
 require('dotenv').config();
@@ -26,47 +30,39 @@ const {
   shouldCommitToday,
   getSessionSize,
   getSessionTimestamps,
+  acquireLock,
+  releaseLock,
 } = require('./scheduler');
 
 const { loadProfile } = require('./patterns');
-const { getWeightedMessage, getMessage } = require('./messages');
-const { makeCommit, getOctokit, getTarget } = require('./committer');
-const {
-  getOpenIssues,
-  openIssue,
-  closeIssue,
-  shouldOpenIssue,
-  shouldCloseIssue,
-  getOpenPRs,
-  openPRWorkflow,
-  mergePR,
-  shouldOpenPR,
-  shouldMergePR,
-} = require('./github-api');
+const { getOctokit, getTarget } = require('./committer');
+const { observe, logWorldView } = require('./reconciler');
+const { planActions, executeAction, describeAction } = require('./work-units');
 
 // ---------------------------------------------------------------------------
-// Parse CLI flags once at startup
+// CLI flags
 // ---------------------------------------------------------------------------
 
 const flags = {
-  dryRun: process.argv.includes('--dry-run') || process.env.DRY_RUN === 'true',
-  force:  process.argv.includes('--force')   || process.env.FORCE   === 'true',
+  dryRun:        process.argv.includes('--dry-run')        || process.env.DRY_RUN        === 'true',
+  reconcileOnly: process.argv.includes('--reconcile-only') || process.env.RECONCILE_ONLY === 'true',
+  force:         process.argv.includes('--force')          || process.env.FORCE          === 'true',
 };
 
 // ---------------------------------------------------------------------------
-// Derive change type from message (maps message prefix to change type)
+// Update badge counters based on action results
 // ---------------------------------------------------------------------------
 
-function changeTypeFromMessage(message) {
-  if (message.startsWith('fix') || message.startsWith('correct')) return 'fix';
-  if (message.startsWith('add'))                                    return 'add';
-  if (message.startsWith('tidy') ||
-      message.startsWith('reorganize') ||
-      message.startsWith('normalize') ||
-      message.startsWith('remove') ||
-      message.startsWith('sort') ||
-      message.startsWith('consolidate'))                            return 'chore';
-  return 'update';
+function updateBadgeStats(stats, result) {
+  if (!result) return stats;
+  switch (result.kind) {
+    case 'pr_merged':         stats.pullShark   = (stats.pullShark   || 0) + 1; break;
+    case 'quickdraw_complete': stats.quickdraw  = (stats.quickdraw   || 0) + 1; break;
+    // YOLO is counted when a PR is merged without a review action having run.
+    // We tag it in the action loop via a flag on the result, not here.
+    default: break;
+  }
+  return stats;
 }
 
 // ---------------------------------------------------------------------------
@@ -74,131 +70,129 @@ function changeTypeFromMessage(message) {
 // ---------------------------------------------------------------------------
 
 async function main() {
-  console.log(`[commit-farmer] starting run — dry-run: ${flags.dryRun}, force: ${flags.force}`);
+  console.log(`[commit-farmer] starting run — dry-run: ${flags.dryRun}, reconcile-only: ${flags.reconcileOnly}, force: ${flags.force}`);
 
+  // --- Lock ---------------------------------------------------------------
+
+  const lock = acquireLock();
+  if (!lock.acquired) {
+    console.log(`[commit-farmer] aborting: ${lock.reason}`);
+    process.exit(0);
+  }
+
+  try {
+    await runFarmer();
+  } finally {
+    releaseLock();
+  }
+}
+
+async function runFarmer() {
   const profile = loadProfile();
   const state   = readState();
 
-  console.log(`[commit-farmer] profile: ${profile.name} | streak: ${state.currentStreakDays} days | dry spell: ${state.currentDrySpellDays} days | total commits: ${state.totalCommits}`);
+  console.log(`[commit-farmer] profile: ${profile.name} | streak: ${state.currentStreakDays}d | dry spell: ${state.currentDrySpellDays}d | total commits: ${state.totalCommits}`);
+  console.log(`[commit-farmer] badges: pullShark=${state.badgeStats.pullShark} quickdraw=${state.badgeStats.quickdraw} yolo=${state.badgeStats.yolo}`);
 
-  // --- Commit decision ---------------------------------------------------
+  // --- Active day decision -----------------------------------------------
 
   let decision;
-  if (flags.force) {
-    decision = { commit: true, forced: true, reason: '--force flag set' };
+  if (flags.force || flags.reconcileOnly) {
+    decision = { commit: true, forced: true, reason: flags.reconcileOnly ? 'reconcile-only' : '--force' };
   } else {
     decision = shouldCommitToday(profile, state);
   }
 
-  console.log(`[scheduler] ${decision.commit ? 'committing' : 'skipping'} — ${decision.reason}`);
+  console.log(`[scheduler] ${decision.commit ? 'active' : 'idle'} — ${decision.reason}`);
 
   if (!decision.commit) {
     const nextState = computeNextState(state, false, 0);
     writeState(nextState);
-    console.log('[commit-farmer] run complete — no commits today');
+    console.log('[commit-farmer] run complete — no actions today');
     return;
   }
 
-  // --- Session planning --------------------------------------------------
-
-  const sessionSize = getSessionSize(profile);
-  const timestamps  = getSessionTimestamps(sessionSize);
-
-  console.log(`[scheduler] session: ${sessionSize} commit${sessionSize > 1 ? 's' : ''}`);
-  timestamps.forEach((ts, i) => {
-    console.log(`[scheduler]   commit ${i + 1}: ${ts.toISOString()}`);
-  });
-
-  if (flags.dryRun) {
-    console.log('[dry-run] would make the above commits — exiting without pushing');
-    return;
-  }
-
-  // --- Execute commits ---------------------------------------------------
+  // --- Observe the world -------------------------------------------------
 
   const octokit       = getOctokit();
   const { owner, repo } = getTarget();
-  let committedCount  = 0;
+  const authorName    = process.env.GIT_AUTHOR_NAME  || 'Devon Stone';
+  const authorEmail   = process.env.GIT_AUTHOR_EMAIL || 'thedevonstone@gmail.com';
 
-  for (let i = 0; i < sessionSize; i++) {
-    const message    = getWeightedMessage();
-    const changeType = changeTypeFromMessage(message);
-    const timestamp  = timestamps[i];
+  const view = await observe(octokit, owner, repo);
+  logWorldView(view);
 
-    console.log(`[committer] commit ${i + 1}/${sessionSize} — "${message}"`);
+  // --- Plan today's actions ----------------------------------------------
+
+  const sessionSize = getSessionSize(profile);
+  const timestamps  = getSessionTimestamps(sessionSize);
+  const actions     = planActions(view, profile, sessionSize);
+
+  console.log(`[planner] session size: ${sessionSize} | planned actions: ${actions.length}`);
+  actions.forEach((a, i) => {
+    const ts = timestamps[i] ? timestamps[i].toISOString() : '<no slot>';
+    console.log(`[planner]   ${i + 1}. ${describeAction(a)} @ ${ts}`);
+  });
+
+  if (flags.reconcileOnly) {
+    console.log('[reconcile-only] world view + plan above — no actions executed');
+    return;
+  }
+  if (flags.dryRun) {
+    console.log('[dry-run] would execute the above actions — exiting');
+    return;
+  }
+
+  // --- Execute -----------------------------------------------------------
+
+  // Anything in this set creates a green square on the contribution graph.
+  const GRAPH_EVENT_KINDS = new Set([
+    'commit_on_branch',
+    'commit_on_main',
+    'branch_created',
+    'unit_started',     // issue opened
+    'pr_opened',
+    'review_submitted',
+    'pr_merged',
+    'quickdraw_complete',
+  ]);
+
+  let graphEvents = 0;
+  for (let i = 0; i < actions.length; i++) {
+    const action    = actions[i];
+    const timestamp = timestamps[i] || timestamps[timestamps.length - 1] || new Date();
+    const ctx       = { octokit, owner, repo, authorName, authorEmail, timestamp };
 
     try {
-      await makeCommit(changeType, message, timestamp);
-      committedCount++;
+      const result = await executeAction(action, ctx);
+      updateBadgeStats(state.badgeStats, result);
+
+      if (GRAPH_EVENT_KINDS.has(result.kind)) graphEvents += 1;
+
+      // YOLO badge: a PR merged without ever receiving a review.
+      // Source of truth is the PR's review state on GitHub (captured in
+      // hadReview by the reconciler) — NOT the order of actions in this run.
+      if (result.kind === 'pr_merged' && result.hadReview === false) {
+        state.badgeStats.yolo = (state.badgeStats.yolo || 0) + 1;
+      }
     } catch (err) {
-      console.error(`[committer] commit ${i + 1} failed: ${err.message}`);
-      // Continue with remaining commits — partial session is still valid
+      console.error(`[executor] action ${i + 1} failed: ${err.message}`);
+      // Continue — next reconciler run will see the partial state and resume.
     }
   }
 
-  // --- Issue simulation --------------------------------------------------
+  // --- Update analytics state -------------------------------------------
 
-  const openIssueNumbers = await getOpenIssues(octokit, owner, repo).catch(() => []);
-  state.openIssues = openIssueNumbers;
-
-  if (shouldCloseIssue(openIssueNumbers.length, state.totalCommits)) {
-    const toClose = openIssueNumbers[0];
-    await closeIssue(octokit, owner, repo, toClose).catch(err => {
-      console.error(`[github-api] failed to close issue #${toClose}: ${err.message}`);
-    });
-    state.openIssues = openIssueNumbers.filter(n => n !== toClose);
-  }
-
-  if (shouldOpenIssue(state.openIssues.length)) {
-    const newIssue = await openIssue(octokit, owner, repo).catch(err => {
-      console.error(`[github-api] failed to open issue: ${err.message}`);
-      return null;
-    });
-    if (newIssue) state.openIssues.push(newIssue);
-  }
-
-  // --- PR simulation -----------------------------------------------------
-
-  const authorName  = process.env.GIT_AUTHOR_NAME  || 'Devon Stone';
-  const authorEmail = process.env.GIT_AUTHOR_EMAIL || 'thedevonstone@gmail.com';
-
-  const openPRs = await getOpenPRs(octokit, owner, repo).catch(() => []);
-  state.openPRs = openPRs;
-
-  if (shouldMergePR(openPRs.length)) {
-    const toMerge = openPRs[0];
-    await mergePR(octokit, owner, repo, toMerge.number, toMerge.branch).catch(err => {
-      console.error(`[github-api] failed to merge PR #${toMerge.number}: ${err.message}`);
-    });
-    state.openPRs = openPRs.filter(p => p.number !== toMerge.number);
-  }
-
-  if (shouldOpenPR(state.openPRs.length)) {
-    const newPR = await openPRWorkflow(octokit, owner, repo, authorName, authorEmail).catch(err => {
-      console.error(`[github-api] failed to open PR: ${err.message}`);
-      return null;
-    });
-    if (newPR) state.openPRs.push(newPR);
-  }
-
-  // --- Write state -------------------------------------------------------
-
-  const nextState = computeNextState(
-    { ...state },
-    committedCount > 0,
-    committedCount,
-  );
-  nextState.openIssues = state.openIssues;
-  nextState.openPRs    = state.openPRs;
+  const nextState = computeNextState(state, graphEvents > 0, graphEvents);
+  nextState.badgeStats = state.badgeStats;
   writeState(nextState);
 
-  // --- Summary -----------------------------------------------------------
-
-  console.log(`[commit-farmer] run complete — ${committedCount}/${sessionSize} commits pushed`);
-  console.log(`[state] streak: ${nextState.currentStreakDays} days | total: ${nextState.totalCommits} commits`);
+  console.log(`[commit-farmer] run complete — ${graphEvents} contribution graph event(s)`);
+  console.log(`[state] streak: ${nextState.currentStreakDays}d | total: ${nextState.totalCommits} | badges: pullShark=${nextState.badgeStats.pullShark} yolo=${nextState.badgeStats.yolo} quickdraw=${nextState.badgeStats.quickdraw}`);
 }
 
 main().catch(err => {
   console.error('[commit-farmer] fatal:', err.message);
+  releaseLock();
   process.exit(1);
 });

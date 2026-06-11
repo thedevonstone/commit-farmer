@@ -49,6 +49,9 @@ const { weightedRandom, applyDrySpellLogic, applyStreakBreakerLogic } = require(
 
 const STATE_DIR  = path.resolve(__dirname, '../.state');
 const STATE_PATH = path.join(STATE_DIR, 'run.json');
+const LOCK_PATH  = path.join(STATE_DIR, 'run.lock');
+
+const STALE_LOCK_AGE_MS = 30 * 60 * 1000; // 30 min — anything older is dead
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -83,14 +86,22 @@ function readState() {
   try {
     state = JSON.parse(fs.readFileSync(STATE_PATH, 'utf8'));
   } catch {
-    state = {
-      lastCommitDate:      null,
-      currentStreakDays:   0,
-      currentDrySpellDays: 0,
-      totalCommits:        0,
-      openIssues:          [],
-    };
+    state = defaultState();
   }
+
+  // Migrate older state files: drop fields that are now derived from GitHub
+  // (openIssues, openPRs) and add new analytics fields if missing.
+  delete state.openIssues;
+  delete state.openPRs;
+  state.badgeStats = state.badgeStats || {
+    pullShark:  0,
+    yolo:       0,
+    quickdraw:  0,
+    galaxyBrain: 0,
+  };
+  state.lastCommitDate      = state.lastCommitDate      || null;
+  state.currentStreakDays   = state.currentStreakDays   || 0;
+  state.totalCommits        = state.totalCommits        || 0;
 
   // Recompute dry spell from lastCommitDate — stored count can lag if
   // an Actions job fires, rolls "no commit", and that day goes uncounted.
@@ -98,6 +109,21 @@ function readState() {
   state.currentDrySpellDays = days === Infinity ? 0 : Math.max(0, days - 1);
 
   return state;
+}
+
+function defaultState() {
+  return {
+    lastCommitDate:      null,
+    currentStreakDays:   0,
+    currentDrySpellDays: 0,
+    totalCommits:        0,
+    badgeStats: {
+      pullShark:  0,
+      yolo:       0,
+      quickdraw:  0,
+      galaxyBrain: 0,
+    },
+  };
 }
 
 /**
@@ -139,11 +165,11 @@ function computeNextState(prevState, committed, commitCount) {
     : 1;
 
   return {
+    ...prevState,
     lastCommitDate:      today,
     currentStreakDays:   newStreak,
     currentDrySpellDays: 0,
     totalCommits:        prevState.totalCommits + commitCount,
-    openIssues:          prevState.openIssues,
   };
 }
 
@@ -261,6 +287,41 @@ function getSessionTimestamps(count) {
   return timestamps;
 }
 
+// ---------------------------------------------------------------------------
+// Lock file — prevents concurrent runs from stomping each other
+// ---------------------------------------------------------------------------
+
+function acquireLock() {
+  if (!fs.existsSync(STATE_DIR)) {
+    fs.mkdirSync(STATE_DIR, { recursive: true });
+  }
+
+  if (fs.existsSync(LOCK_PATH)) {
+    const stat = fs.statSync(LOCK_PATH);
+    const ageMs = Date.now() - stat.mtimeMs;
+    if (ageMs < STALE_LOCK_AGE_MS) {
+      return {
+        acquired: false,
+        reason:   `lock held — ${Math.round(ageMs / 1000)}s old (max ${STALE_LOCK_AGE_MS / 1000}s)`,
+      };
+    }
+    // Stale lock — overwrite it.
+    console.log(`[scheduler] removing stale lock (age ${Math.round(ageMs / 60000)}m)`);
+  }
+
+  fs.writeFileSync(LOCK_PATH, JSON.stringify({
+    pid:       process.pid,
+    startedAt: new Date().toISOString(),
+  }));
+  return { acquired: true };
+}
+
+function releaseLock() {
+  try {
+    fs.unlinkSync(LOCK_PATH);
+  } catch { /* missing is fine */ }
+}
+
 module.exports = {
   readState,
   writeState,
@@ -268,4 +329,6 @@ module.exports = {
   shouldCommitToday,
   getSessionSize,
   getSessionTimestamps,
+  acquireLock,
+  releaseLock,
 };

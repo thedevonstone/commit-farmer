@@ -19,7 +19,13 @@
       "Bash(node src/index.js --force)",
       "Bash(gh workflow *)",
       "Bash(gh run *)",
-      "Bash(node src/index.js --dry-run --force)"
+      "Bash(node src/index.js --dry-run --force)",
+      "Bash(git checkout *)",
+      "Bash(node --check src/reconciler.js)",
+      "Bash(node --check src/work-units.js)",
+      "Bash(node --check src/index.js)",
+      "Bash(node --check src/scheduler.js)",
+      "Bash(node *)"
     ]
   }
 }
