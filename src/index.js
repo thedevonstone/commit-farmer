@@ -106,8 +106,10 @@ async function runFarmer() {
   console.log(`[scheduler] ${decision.commit ? 'active' : 'idle'} — ${decision.reason}`);
 
   if (!decision.commit) {
-    const nextState = computeNextState(state, false, 0);
-    writeState(nextState);
+    if (!flags.dryRun && !flags.reconcileOnly) {
+      const nextState = computeNextState(state, false, 0);
+      writeState(nextState);
+    }
     console.log('[commit-farmer] run complete — no actions today');
     return;
   }

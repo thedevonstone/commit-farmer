@@ -66,6 +66,13 @@ const MAX_BRANCH_AGE_BEFORE_PR_DAYS = 4;
 const MIN_PR_AGE_BEFORE_MERGE_DAYS  = 1;
 const MAX_PR_AGE_BEFORE_MERGE_DAYS  = 4;
 
+// Per-run probability of injecting a quickdraw cycle. Quickdraw is
+// self-contained (open + close inside one run) and doesn't add to the
+// in-flight unit count, so it's decoupled from MAX_UNITS_IN_FLIGHT. This
+// keeps the Quickdraw badge trickling in even when the farmer is busy
+// advancing standard-flow units.
+const QUICKDRAW_ROLL_PROBABILITY = 0.20;
+
 // ---------------------------------------------------------------------------
 // Issue / PR text templates
 // ---------------------------------------------------------------------------
@@ -204,7 +211,16 @@ function planActions(view, profile, actionBudget) {
     }
   }
 
-  // --- 2. Start a new unit if there's room and budget -------------------
+  // --- 2. Roll for a self-contained quickdraw cycle ---------------------
+  // Runs independently of MAX_UNITS_IN_FLIGHT so the badge keeps progressing
+  // even when the farmer is saturated with standard-flow units.
+
+  if (budget > 0 && Math.random() < QUICKDRAW_ROLL_PROBABILITY) {
+    actions.push({ type: 'quickdraw', topic: pickTopic() });
+    budget -= 1;
+  }
+
+  // --- 3. Start a new unit if there's room and budget -------------------
 
   const inFlight = view.units.length;
   if (budget > 0 && inFlight < MAX_UNITS_IN_FLIGHT) {
@@ -228,7 +244,7 @@ function planActions(view, profile, actionBudget) {
     }
   }
 
-  // --- 3. Use remaining budget on follow-on commits to in-progress units
+  // --- 4. Use remaining budget on follow-on commits to in-progress units
 
   if (budget > 0) {
     const inProgress = view.units.filter(u => u.stage === 'in_progress');
@@ -270,7 +286,15 @@ function decideAdvance(unit) {
       if (!unit.hasReview && flavor !== 'yolo') {
         return [{ type: 'submit_review', unit }];
       }
-      // Reviewed (or YOLO): consider merging if the PR is old enough.
+      // YOLO: merge immediately once at review. Skipping the age/probability
+      // gate is the whole point — YOLO = "shipped without waiting", so the
+      // badge should land on the first run the PR is visible.
+      if (flavor === 'yolo') {
+        const actions = [{ type: 'merge_pr', unit }];
+        if (unit.issueNumber) actions.push({ type: 'close_issue', unit });
+        return actions;
+      }
+      // Standard flow: consider merging if the PR is old enough.
       if (unit.branchAgeDays >= MIN_PR_AGE_BEFORE_MERGE_DAYS) {
         const rollChance = unit.branchAgeDays >= MAX_PR_AGE_BEFORE_MERGE_DAYS
           ? 1.0
