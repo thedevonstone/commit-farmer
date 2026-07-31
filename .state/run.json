@@ -1,7 +1,7 @@
 {
   "lastCommitDate": "2026-07-31",
-  "currentStreakDays": 1,
-  "currentDrySpellDays": 0,
+  "currentStreakDays": 0,
+  "currentDrySpellDays": 1,
   "totalCommits": 174,
   "badgeStats": {
     "pullShark": 20,
